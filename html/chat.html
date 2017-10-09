@@ -4,9 +4,64 @@
   <meta charset="UTF-8">
   <script language="javascript" type="text/javascript" src="/libraries/p5.js"></script>
   <script language="javascript" src="/libraries/p5.dom.js"></script>
+
+  <link href="/css/main.css" rel="stylesheet" type="text/css">
+  <link href="https://fonts.googleapis.com/css?family=Roboto" rel="stylesheet">
+  <script src="https://www.gstatic.com/firebasejs/4.5.0/firebase.js"></script>
+
   <script language="javascript" src="/libraries/p5.sound.js"></script>
+
   <script language="javascript" type="text/javascript" src="../java/java.js"></script>
+
 </head>
-<body>
+<body onload="alerts()">
+  <div class="container">
+    <header>
+      Stage 2 SACE
+  </header>
+  <nav>
+    Where to next?
+
+
+    <a href="/index.html"> Home?</a>
+    <br>
+    Legal Studies
+    <br>
+    Japanese
+    <br>
+    Psychology
+    <br>
+    <a href="chat.html"> Chat</a>
+    <br>
+    <br>
+    <br>
+    <div class="nameInput" id="nameInput">
+    <input type="text" placeholder="Enter your name" id="namebox"></input><span id="errNa"></span>
+    <input type="button" value="Submit name"  onclick="enterName()"></input>
+  </div>
+    <br>
+    <div class="messageInput" id="messageInput">
+    <input type="text" placeholder="Enter your message" id="messageBox"></input><span id="errMe"></span>
+      <input type="button" value="Send message"  onclick="sendMessage()"></input>
+</div>
+  </nav>
+  <aside>
+  </aside>
+  <section >
+    <div id="section" class="section">
+      <p>
+        <ol id="messArea"class="messArea">
+
+        </ol>
+      </p>
+
+    </div>
+
+
+  </section>
+
+  </div>
+
+
 </body>
 </html>
