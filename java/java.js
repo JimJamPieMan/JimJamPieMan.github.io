@@ -57,7 +57,7 @@ var messageArea = document.getElementById("section");
      var name = namemessage[k].name;
      var message = namemessage[k].message;
      //console.log(initials, score);
-    messageArea.innerHTML += "<br>" + name + " said " + message;
+    messageArea.innerHTML += "<br>" + "<strong>"+ name + "</strong>" + " said " + message;
    }
 
  }
