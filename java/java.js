@@ -102,7 +102,7 @@ function sendMessage(){
   }
 
   message = messageBox.value.toString();
-  messageArea.innerHTML += "<br>" + name + " said " + message;
+  messageArea.innerHTML += "<br>" + "<strong>"+ name + "</strong>" +  message;
 
 sendToFirebase();
 
