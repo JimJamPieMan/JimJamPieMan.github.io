@@ -105,7 +105,7 @@ function sendMessage(){
   messageArea.innerHTML += "<br>" + name + " said " + message;
 
 sendToFirebase();
-gotData();
+
 
 errMessage.innerHTML="";
 messageBox.value="";
