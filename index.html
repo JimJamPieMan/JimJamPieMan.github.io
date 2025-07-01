@@ -232,7 +232,7 @@
             color: #088;
         }
 
-        #layers, #provider, #select {
+        #layers, #provider,#provider2, #select {
             position: absolute;
             padding: .3em .5em .2em .5em;
             font-family: monospace;
@@ -243,7 +243,7 @@
             user-select: none;
         }
 
-        #layers:hover, #provider:hover, #select:hover {
+        #layers:hover, #provider:hover, #provider2:hover, #select:hover {
             filter: brightness(125%);
         }
 
@@ -281,13 +281,20 @@
             padding: 0.1em .3em 0.1em 0.3em;
             font-size: 16pt;
         }
+        #provider2 {
+            right: 0.25em;
+            bottom: 5.25em;
+         
+            padding: 0.1em .3em 0.1em 0.3em;
+            font-size: 16pt;
+        }
 
-        #provider form {
+        #provider,#provider2 form {
             font-size: 12pt;
             color: #333;
         }
 
-        #provider * {
+        #provider,#provider2 * {
             margin: 0;
             padding: 0;
         }
@@ -308,8 +315,13 @@
     <div id="select"><img src="pointer.svg"/></div>
 
     <div id="provider"></div>
+    <div id="provider2">
+        <input type="file" id="kmlFile" accept=".kml" />
+        <div id="layerskml"></div>
+    </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="https://unpkg.com/leaflet-omnivore/leaflet-omnivore.min.js"></script>
     <script src="config.js"></script>
     <script>
         let uuid = crypto.randomUUID();
@@ -476,6 +488,8 @@
             updateMap();
         }
 
+      
+
         let base_layer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
             zoomOffset: 0,
             minZoom: 2,
@@ -492,6 +506,7 @@
             worldCopyJump: true,
             layers: [base_layer]
         });
+        
 
         map.attributionControl.setPrefix('<a href="https://github.com/ClickHouse/adsb.exposed/">About</a>');
 
@@ -499,6 +514,144 @@
         let map_elem = document.getElementById('map');
         let selected_box = [];
         let cached_tiles = {};
+
+          document.getElementById('kmlFile').addEventListener('change', function (e) {
+            console.log("file uploaded");
+                const file = e.target.files[0];
+                if (!file) return;
+                const minAlt = 0;
+              const maxAlt = 40000;
+
+              function getAltitudeFromFeature(feature) {
+                const coords = feature.geometry?.coordinates;
+                  const type = feature.geometry?.type;
+
+                  if (!coords) return 0;
+
+                  if (type === 'Point') {
+                      return coords[2] || 0;
+                  }
+
+                  if (type === 'LineString') {
+                      const altitudes = coords
+                          .map(c => c[2])
+                          .filter(a => typeof a === 'number');
+
+                      const sum = altitudes.reduce((a, b) => a + b, 0);
+                      return altitudes.length ? sum / altitudes.length : 0;
+                  }
+
+                  return 0; // fallback
+              }
+
+              function getLineOfSightRadiusMeters(alt) {
+                  return 3570 * Math.sqrt(alt);
+              }
+
+             
+                function getGradientColor(alt) {
+
+                    return '#8000ff';
+                //   const clamped = Math.max(minAlt, Math.min(maxAlt, alt));
+                //   const ratio = (clamped - minAlt) / (maxAlt - minAlt);
+
+                //   // Hue from 120° (green) to 0° (red)
+                //   const hue = (1 - ratio) * 120;
+
+                //   return `hsl(${hue}, 100%, 50%)`;
+              }
+
+                const reader = new FileReader();
+                reader.onload = function (event) {
+                    const kmlText = event.target.result;
+
+                    // Create a Blob URL from the string
+                    const blob = new Blob([kmlText], { type: 'application/vnd.google-earth.kml+xml' });
+                    const blobUrl = URL.createObjectURL(blob);
+
+                    //const kmlLayer = omnivore.kml(blobUrl);
+                    
+                    const kmlLayer = omnivore.kml(blobUrl, null, L.geoJSON(null, {
+                          
+                        style: function (feature) {
+                         console.log('Altitude:', getAltitudeFromFeature(feature));
+                            const alt = getAltitudeFromFeature(feature);
+                            return {
+                            color: getGradientColor(alt),
+                            weight: 2,
+                            opacity: 0.7
+                            }
+                        },
+                        // onEachFeature: function (feature, layer) {
+                        //     if (feature.geometry.type === 'LineString') {
+                        //         const coords = feature.geometry.coordinates;
+
+                        //         let lastLatLng = null;
+                        //         const spacingMeters = 10000;
+
+                        //         coords.forEach(([lon, lat, alt = 0]) => {
+                        //             const latlng = L.latLng(lat, lon);
+
+                        //             if (!lastLatLng || latlng.distanceTo(lastLatLng) > spacingMeters) {
+                        //                 lastLatLng = latlng;
+
+                        //                 const radius = getLineOfSightRadiusMeters(alt);
+
+                        //                 const bubble = L.circle(latlng, {
+                        //                     radius: radius+10000,
+                        //                     color: 'blue',
+                        //                     fillColor: 'blue',
+                        //                     fillOpacity: 0.1,
+                        //                     weight: 1,
+                        //                     interactive: false
+                        //                 });
+
+                        //                 bubble.addTo(map);
+                        //             }
+                        //         });
+                        //     }
+                        //     if (feature.properties && feature.properties.name) {
+                        //         layer.bindPopup(feature.properties.name);
+                        //     }
+                        // }
+                    }));
+                    var layerArr = [];
+
+      
+              
+                    kmlLayer.on('ready', function () {
+                        console.log('KML loaded! Features:', kmlLayer.getLayers().length);
+                        kmlLayer.addTo(map);
+                        map.fitBounds(kmlLayer.getBounds());
+                        layerArr.push(kmlLayer);
+                       var layer = document.createElement("button");
+                       layer.id = file.name;
+                       layer.textContent = "Remove " + file.name;
+                       var breakLine = document.createElement("br");
+                       breakLine.id = "break" +file.name;    
+                        document.getElementById('layerskml').appendChild(layer);
+                         document.getElementById('layerskml').appendChild(breakLine);
+                         layer.onclick = function  (){removeKMLLayer(file.name);}
+                    });
+                 
+
+                    function removeKMLLayer(fileName) {
+                        map.removeLayer(layerArr[layerArr.length - 1]);
+                        layerArr.splice(layerArr.length - 1, 1);
+                        console.log(fileName);
+
+                        document.getElementById("layerskml").removeChild(document.getElementById(fileName));
+                        document.getElementById("layerskml").removeChild(document.getElementById("break"+fileName));
+                    };
+                    kmlLayer.on('error', function (e) {
+                        console.error('Omnivore error event:', e);
+                    });
+
+                };
+                reader.readAsText(file);
+            });
+
+        
 
         /// Protect from race conditions.
         let report_sequence_num = 0;
