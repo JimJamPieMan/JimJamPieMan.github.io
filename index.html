@@ -232,7 +232,7 @@
             color: #088;
         }
 
-        #layers, #provider,#provider2, #select {
+        #layers, #provider,#provider2, #select,#kmlgeojson {
             position: absolute;
             padding: .3em .5em .2em .5em;
             font-family: monospace;
@@ -243,12 +243,22 @@
             user-select: none;
         }
 
-        #layers:hover, #provider:hover, #provider2:hover, #select:hover {
+        #layers:hover, #provider:hover, #provider2:hover, #select:hover, #kmlgeojson:hover {
             filter: brightness(125%);
         }
 
-        #layers {
+        #layers,#kmlgeojson {
             left: 1em;
+            bottom: 1em;
+            width: 2em;
+            height: 2em;
+            padding: .3em .5em .2em .5em;
+            font-size: 16pt;
+            text-align: center;
+            cursor: pointer;
+        }
+        #kmlgeojson {
+            left: 7em;
             bottom: 1em;
             width: 2em;
             height: 2em;
@@ -277,7 +287,7 @@
         #provider {
             right: 0.25em;
             bottom: 1.25em;
-            height: 3em;
+            height: 4em;
             padding: 0.1em .3em 0.1em 0.3em;
             font-size: 16pt;
         }
@@ -312,11 +322,15 @@
     <div id="picture"><img/><span id="picture-copyright">Picture from Wikipedia, &copy; the details at the corresponding page.</span></div>
     <div id="error"></div>
     <div id="layers">👁</div>
+    <div id="kmlgeojson">🌐</div>
     <div id="select"><img src="pointer.svg"/></div>
 
     <div id="provider"></div>
     <div id="provider2">
-        <input type="file" id="kmlFile" accept=".kml" />
+        <p>accepted sources are: fr24 flight history KML, adsbex uncorrected pressure alt or https://github.com/LuisSevillano/flightradar24-to-csv</p>
+        <p>to hide this box to take screenshots, press the globe on the right handside.</p>
+        <input type="file" id="kmlFile" multiple accept=".kml" />
+        <input type="file" id="geojsonInput" multiple accept=".geojson,.json">
         <div id="layerskml"></div>
     </div>
 
@@ -324,6 +338,8 @@
     <script src="https://unpkg.com/leaflet-omnivore/leaflet-omnivore.min.js"></script>
     <script src="config.js"></script>
     <script>
+
+
         let uuid = crypto.randomUUID();
 
         let dataset;
@@ -506,7 +522,66 @@
             worldCopyJump: true,
             layers: [base_layer]
         });
-        
+        const minAlt = 0;
+            const maxAlt = 12000;
+
+            function getAltitudeFromFeature(feature) {
+                    // First try altitude from properties if present
+                    
+
+                    if (feature.properties && feature.properties.altitude && typeof feature.properties.altitude.meters === 'number') {
+                        return feature.properties.altitude.meters;
+                    }
+
+                    // Otherwise, try to extract from coordinates as you currently do
+                    const geom = feature.geometry;
+                    if (!geom || !geom.coordinates) return 0;
+
+                    let coords = [];
+
+                    if (geom.type === 'Point') {
+                        coords = [geom.coordinates];
+                    } else if (geom.type === 'LineString') {
+                        coords = geom.coordinates;
+                    } else if (geom.type === 'MultiLineString') {
+                        coords = geom.coordinates.flat();
+                    } else if (geom.type === 'Polygon') {
+                        coords = geom.coordinates.flat();
+                    } else {
+                        return 0;
+                    }
+
+                    const alts = coords.map(c => c[2]).filter(a => typeof a === 'number' && !isNaN(a));
+                    if (alts.length === 0) return 0;
+
+                    return alts.reduce((a, b) => a + b, 0) / alts.length;
+                }
+
+
+            function getLineOfSightRadiusMeters(alt) {
+                return 3570 * Math.sqrt(alt);
+            }
+
+
+            function getGradientColor(alt) {
+                    const clamped = Math.max(minAlt, Math.min(maxAlt, alt));
+                    const ratio = (clamped - minAlt) / (maxAlt - minAlt);
+
+                    let hue;
+                    if (ratio < 0.5) {
+                        // First half: green (120°) to blue (240°)
+                        const localRatio = ratio / 0.5;  // scale 0 to 1 over first half
+                        hue = 120 + localRatio * (240 - 120);
+                    } else {
+                        // Second half: blue (240°) to red (360° or 0°)
+                        const localRatio = (ratio - 0.5) / 0.5;  // scale 0 to 1 over second half
+                        // We'll use 360 instead of 0 to keep it increasing
+                        hue = 240 + localRatio * (360 - 240);
+                    }
+
+                    return `hsl(${hue}, 100%, 50%)`;
+                }
+
 
         map.attributionControl.setPrefix('<a href="https://github.com/ClickHouse/adsb.exposed/">About</a>');
 
@@ -514,141 +589,278 @@
         let map_elem = document.getElementById('map');
         let selected_box = [];
         let cached_tiles = {};
+        var layerArr = [];
+
+        function splitLineStringByAltitude(lineFeature) {
+                const coords = lineFeature.geometry.coordinates;
+                const segments = [];
+
+                for (let i = 0; i < coords.length - 1; i++) {
+                    const start = coords[i];
+                    const end = coords[i + 1];
+                    const avgAlt = ((start[2] || 0) + (end[2] || 0)) / 2;
+
+                    segments.push({
+                        type: "Feature",
+                        geometry: {
+                            type: "LineString",
+                            coordinates: [start, end]
+                        },
+                        properties: {
+                            altitude: avgAlt
+                        }
+                    });
+                }
+
+                return {
+                    type: "FeatureCollection",
+                    features: segments
+                };
+            }
+
+        document.getElementById('geojsonInput').addEventListener('change', function (e) {
+
+            for(var i = 0; i < e.target.files.length; i++) {
+                const file = e.target.files[i];
+                if (!file) return;
+
+
+                const reader = new FileReader();
+                reader.onload = function (event) {
+                    const geojsonText = event.target.result;
+                    const geojsonDataRaw = JSON.parse(geojsonText);
+                    function convertToGeoJSONFeatureCollection(data) {
+                        const feature = data.features?.[0];
+                        if (!feature || feature.geometry?.type !== 'LineString') {
+                            throw new Error('GeoJSON must be a FeatureCollection with a LineString feature.');
+                        }
+
+                        
+
+                        const coords = feature.geometry.coordinates;
+                        const altitudeArray = feature.properties || [];
+
+                        // If already 3D coordinates:
+                        if (coords[0].length === 3) {
+                            return splitLineStringByAltitude(feature);
+                        }
+
+                        if (!Array.isArray(coords) || coords.length !== altitudeArray.length) {
+                            throw new Error('Coordinate and altitude array lengths do not match.');
+                        }
+
+                        // Inject altitude into each coordinate
+                        const coordsWithAlt = coords.map((coord, i) => [...coord, altitudeArray[i].altitude?.meters ?? 0]);
+                        feature.geometry.coordinates = coordsWithAlt;
+
+                        // Now split into segments
+                        return splitLineStringByAltitude(feature);
+                    }
+                    const geojsonData = convertToGeoJSONFeatureCollection(geojsonDataRaw);
+
+                    const geojsonLayer = L.geoJSON(geojsonData, {
+                        style: function (feature) {
+                            const alt = getAltitudeFromFeature(feature);
+                            console.log('Altitude:', alt);
+                            return {
+                                color: getGradientColor(alt),
+                                weight: 2,
+                                opacity: 0.7
+                            };
+                        },
+                        onEachFeature: function (feature, layer) {
+                            if (feature.properties && feature.properties.name) {
+                                layer.bindPopup(feature.properties.name);
+                            }
+                        }
+                    });
+
+                    geojsonLayer.addTo(map);
+                    map.fitBounds(geojsonLayer.getBounds());
+                    layerArr.push(geojsonLayer);
+
+                    // Add button to remove
+                    const layerBtn = document.createElement("button");
+                    layerBtn.id = layerArr.length;
+                    layerBtn.textContent = "Remove " + file.name;
+
+                    const br = document.createElement("br");
+                    br.id = "break" + file.name;
+
+                    document.getElementById('layerskml').appendChild(layerBtn);
+                    document.getElementById('layerskml').appendChild(br);
+
+                    layerBtn.onclick = function () {
+                        map.removeLayer(geojsonLayer);
+                        document.getElementById("layerskml").removeChild(document.getElementById(layerArr.length));
+                        layerArr.splice(layerArr.indexOf(geojsonLayer), 1);
+                        
+                        document.getElementById("layerskml").removeChild(document.getElementById("break" + file.name));
+                    };
+                };
+
+                reader.readAsText(file);
+            }
+            });
 
           document.getElementById('kmlFile').addEventListener('change', function (e) {
             console.log("file uploaded");
+            for (let i = 0; i < e.target.files.length; i++) {
                 const file = e.target.files[0];
                 if (!file) return;
-                const minAlt = 0;
-              const maxAlt = 40000;
-
-              function getAltitudeFromFeature(feature) {
-                const coords = feature.geometry?.coordinates;
-                  const type = feature.geometry?.type;
-
-                  if (!coords) return 0;
-
-                  if (type === 'Point') {
-                      return coords[2] || 0;
-                  }
-
-                  if (type === 'LineString') {
-                      const altitudes = coords
-                          .map(c => c[2])
-                          .filter(a => typeof a === 'number');
-
-                      const sum = altitudes.reduce((a, b) => a + b, 0);
-                      return altitudes.length ? sum / altitudes.length : 0;
-                  }
-
-                  return 0; // fallback
-              }
-
-              function getLineOfSightRadiusMeters(alt) {
-                  return 3570 * Math.sqrt(alt);
-              }
-
+              
              
-                function getGradientColor(alt) {
-
-                    return '#8000ff';
-                //   const clamped = Math.max(minAlt, Math.min(maxAlt, alt));
-                //   const ratio = (clamped - minAlt) / (maxAlt - minAlt);
-
-                //   // Hue from 120° (green) to 0° (red)
-                //   const hue = (1 - ratio) * 120;
-
-                //   return `hsl(${hue}, 100%, 50%)`;
-              }
-
                 const reader = new FileReader();
                 reader.onload = function (event) {
                     const kmlText = event.target.result;
 
-                    // Create a Blob URL from the string
-                    const blob = new Blob([kmlText], { type: 'application/vnd.google-earth.kml+xml' });
-                    const blobUrl = URL.createObjectURL(blob);
+                    function extractCoordsFromKML(kmlText) {
+                        const coords = [];
 
-                    //const kmlLayer = omnivore.kml(blobUrl);
-                    
-                    const kmlLayer = omnivore.kml(blobUrl, null, L.geoJSON(null, {
-                          
-                        style: function (feature) {
-                         console.log('Altitude:', getAltitudeFromFeature(feature));
-                            const alt = getAltitudeFromFeature(feature);
-                            return {
-                            color: getGradientColor(alt),
-                            weight: 2,
-                            opacity: 0.7
+                        // Match <gx:coord> format: lon lat alt
+                        const gxCoordRegex = /<gx:coord[^>]*>\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s*<\/gx:coord>/gi;
+                        let match;
+                        while ((match = gxCoordRegex.exec(kmlText)) !== null) {
+                            const lon = parseFloat(match[1]);
+                            const lat = parseFloat(match[2]);
+                            const alt = parseFloat(match[3]);
+                            coords.push([lon, lat, alt]);
+                        }
+
+                        // If no gx:coord found, try <coordinates>
+                        if (coords.length === 0) {
+                            const coordinatesRegex = /<coordinates[^>]*>([\s\S]*?)<\/coordinates>/gi;
+                            while ((match = coordinatesRegex.exec(kmlText)) !== null) {
+                                const coordBlock = match[1].trim(); // text inside <coordinates>...</coordinates>
+
+                                const lines = coordBlock.split(/\s+/); // split on any whitespace
+
+                                lines.forEach(line => {
+                                    const parts = line.split(',');
+                                    const lon = parseFloat(parts[0]);
+                                    const lat = parseFloat(parts[1]);
+                                    const alt = parseFloat(parts[2]) || 0; // default to 0 if missing
+                                    if (!isNaN(lon) && !isNaN(lat)) {
+                                        coords.push([lon, lat, alt]);
+                                    }
+                                });
                             }
-                        },
-                        // onEachFeature: function (feature, layer) {
-                        //     if (feature.geometry.type === 'LineString') {
-                        //         const coords = feature.geometry.coordinates;
+                        }
 
-                        //         let lastLatLng = null;
-                        //         const spacingMeters = 10000;
+                        console.log("Extracted", coords[0]);
+                        return coords;
+                    }
 
-                        //         coords.forEach(([lon, lat, alt = 0]) => {
-                        //             const latlng = L.latLng(lat, lon);
+                    const coords = extractCoordsFromKML(kmlText);
 
-                        //             if (!lastLatLng || latlng.distanceTo(lastLatLng) > spacingMeters) {
-                        //                 lastLatLng = latlng;
 
-                        //                 const radius = getLineOfSightRadiusMeters(alt);
 
-                        //                 const bubble = L.circle(latlng, {
-                        //                     radius: radius+10000,
-                        //                     color: 'blue',
-                        //                     fillColor: 'blue',
-                        //                     fillOpacity: 0.1,
-                        //                     weight: 1,
-                        //                     interactive: false
-                        //                 });
-
-                        //                 bubble.addTo(map);
-                        //             }
-                        //         });
-                        //     }
-                        //     if (feature.properties && feature.properties.name) {
-                        //         layer.bindPopup(feature.properties.name);
-                        //     }
-                        // }
-                    }));
-                    var layerArr = [];
-
-      
-              
-                    kmlLayer.on('ready', function () {
-                        console.log('KML loaded! Features:', kmlLayer.getLayers().length);
-                        kmlLayer.addTo(map);
-                        map.fitBounds(kmlLayer.getBounds());
-                        layerArr.push(kmlLayer);
-                       var layer = document.createElement("button");
-                       layer.id = file.name;
-                       layer.textContent = "Remove " + file.name;
-                       var breakLine = document.createElement("br");
-                       breakLine.id = "break" +file.name;    
-                        document.getElementById('layerskml').appendChild(layer);
-                         document.getElementById('layerskml').appendChild(breakLine);
-                         layer.onclick = function  (){removeKMLLayer(file.name);}
-                    });
-                 
-
-                    function removeKMLLayer(fileName) {
-                        map.removeLayer(layerArr[layerArr.length - 1]);
-                        layerArr.splice(layerArr.length - 1, 1);
-                        console.log(fileName);
-
-                        document.getElementById("layerskml").removeChild(document.getElementById(fileName));
-                        document.getElementById("layerskml").removeChild(document.getElementById("break"+fileName));
+                    const geojson = {
+                        type: "FeatureCollection",
+                        features: [{
+                            type: "Feature",
+                            geometry: {
+                                type: "LineString",
+                                coordinates: coords
+                            },
+                            properties: {}
+                        }]
                     };
-                    kmlLayer.on('error', function (e) {
-                        console.error('Omnivore error event:', e);
-                    });
 
-                };
-                reader.readAsText(file);
+                    function convertToGeoJSONFeatureCollection(data) {
+                        const feature = data.features?.[0];
+                        if (!feature || feature.geometry?.type !== 'LineString') {
+                            throw new Error('GeoJSON must be a FeatureCollection with a LineString feature.');
+                        }
+
+
+
+                        const coords = feature.geometry.coordinates;
+                        const altitudeArray = feature.properties || [];
+
+                        // If already 3D coordinates:
+                        if (coords[0].length === 3) {
+                            return splitLineStringByAltitude(feature);
+                        }
+
+                        if (!Array.isArray(coords) || coords.length !== altitudeArray.length) {
+                            throw new Error('Coordinate and altitude array lengths do not match.');
+                        }
+
+                        // Inject altitude into each coordinate
+                        const coordsWithAlt = coords.map((coord, i) => [...coord, altitudeArray[i].altitude?.meters ?? 0]);
+                        feature.geometry.coordinates = coordsWithAlt;
+
+                        // Now split into segments
+                        return splitLineStringByAltitude(feature);
+                    }
+                    const geojsonData = convertToGeoJSONFeatureCollection(geojson);
+
+                    // // Create a Blob URL from the string
+                    // const blob = new Blob([kmlText], { type: 'application/vnd.google-earth.kml+xml' });
+                    // const blobUrl = URL.createObjectURL(blob);
+
+                    // //const kmlLayer = omnivore.kml(blobUrl);
+                    
+                    // const kmlLayer = omnivore.kml(blobUrl, null, L.geoJSON(null, {
+                          
+                    //     style: function (feature) {
+
+                    //      console.log('Altitude:', getAltitudeFromFeature(feature));
+                    //         const alt = getAltitudeFromFeature(feature);
+                    //         return {
+                    //         color: getGradientColor(alt),
+                    //         weight: 2,
+                    //         opacity: 0.7
+                    //         }
+                    //     },
+                        
+                    // }));
+                  const geojsonLayer = L.geoJSON(geojsonData, {
+                      style: function (feature) {
+                          const alt = getAltitudeFromFeature(feature);
+                          console.log('Altitude:', alt);
+                          return {
+                              color: getGradientColor(alt),
+                              weight: 2,
+                              opacity: 0.7
+                          };
+                      },
+                      onEachFeature: function (feature, layer) {
+                          if (feature.properties && feature.properties.name) {
+                              layer.bindPopup(feature.properties.name);
+                          }
+                      }
+                  });
+
+                  geojsonLayer.addTo(map);
+                  map.fitBounds(geojsonLayer.getBounds());
+                  layerArr.push(geojsonLayer);
+
+                  // Add button to remove
+                  const layerBtn = document.createElement("button");
+                  layerBtn.id = layerArr.length;
+                  layerBtn.textContent = "Remove " + file.name;
+
+                  const br = document.createElement("br");
+                  br.id = "break" + file.name;
+
+                  document.getElementById('layerskml').appendChild(layerBtn);
+                  document.getElementById('layerskml').appendChild(br);
+
+                  layerBtn.onclick = function () {
+                      map.removeLayer(geojsonLayer);
+                      document.getElementById("layerskml").removeChild(document.getElementById(layerArr.length));
+                      layerArr.splice(layerArr.indexOf(geojsonLayer), 1);
+                      
+                      document.getElementById("layerskml").removeChild(document.getElementById("break" + file.name));
+                  };
+              };
+            
+
+              reader.readAsText(file);
+            }
+            
             });
 
         
@@ -953,6 +1165,22 @@
         }
 
         /// Rectangle selection and reports
+
+        let hideUpload = document.getElementById('kmlgeojson');
+        let hideUploadToggle = true;
+
+        hideUpload.addEventListener('click', e => {
+            hideUploadToggle = !hideUploadToggle;
+
+            if( hideUploadToggle) {
+                document.getElementById('provider2').style.display = 'block';
+                
+            } else {
+                document.getElementById('provider2').style.display = 'none';
+             
+            }
+           
+        });
 
         let select_toggle = document.getElementById('select');
         let select_toggle_active = false;
