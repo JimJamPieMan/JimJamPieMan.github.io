@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Definitive MANUAL Drag</title>
+
+    <!-- Leaflet and Geoman CSS/JS remain the same -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.css" />
+    <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js"></script>
+
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+        }
+
+        #map {
+            height: 100%;
+            width: 100%;
+        }
+
+        .controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 10px;
+            border: 1px solid #ccc;
+            font-family: sans-serif;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="map"></div>
+    <div class="controls">
+        <button id="toggleEditButton">Start Editing</button>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+
+            const map = L.map('map').setView([40.7128, -74.0060], 10);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+
+            // Hardcoded track data
+            const hardcodedTrackCoords = [
+                [40.71, -74.01], [40.72, -74.01], [40.72, -73.99], [40.71, -73.99]
+            ];
+            let mainTrack = L.polyline(hardcodedTrackCoords, { color: 'magenta', weight: 8 }).addTo(map);
+
+            const editButton = document.getElementById('toggleEditButton');
+            let isEditing = false;
+            let isDragging = false;
+            let startLatLng;
+
+            function toggleEditing() {
+                isEditing = !isEditing;
+                if (isEditing) {
+                    editButton.textContent = 'Finish Editing';
+                    editButton.style.backgroundColor = 'lightgreen';
+                    map.dragging.disable(); // Disable map panning
+                    console.log("EDIT MODE ON. Magenta track is ready to be dragged.");
+                } else {
+                    editButton.textContent = 'Start Editing';
+                    editButton.style.backgroundColor = '';
+                    map.dragging.enable(); // Re-enable map panning
+                    console.log("EDIT MODE OFF.");
+                }
+            }
+
+            editButton.addEventListener('click', toggleEditing);
+
+            // ===================================================================
+            // MANUAL DRAG IMPLEMENTATION
+            // ===================================================================
+
+            // 1. When the mouse is pressed down ON THE LINE
+            mainTrack.on('mousedown', function (e) {
+                // Only start a drag if we are in edit mode
+                if (!isEditing) return;
+
+                console.log("MOUSEDOWN on track. Starting drag...");
+                isDragging = true;
+
+                // Disable map's double-click zoom during drag to prevent accidents
+                map.doubleClickZoom.disable();
+
+                // Record the starting lat/lng of the click
+                startLatLng = e.latlng;
+
+                // Set cursor for the whole map container to 'move'
+                map.getContainer().style.cursor = 'move';
+            });
+
+            // 2. When the mouse moves ANYWHERE on the map
+            map.on('mousemove', function (e) {
+                // Only do something if a drag is in progress
+                if (!isDragging) return;
+
+                console.log("MOUSEMOVE while dragging...");
+
+                // Calculate the difference between the current mouse position and the start position
+                const lat_diff = e.latlng.lat - startLatLng.lat;
+                const lng_diff = e.latlng.lng - startLatLng.lng;
+
+                // Get all points of the line
+                const latlngs = mainTrack.getLatLngs();
+
+                // Create a new array of points by applying the difference to each one
+                const new_latlngs = latlngs.map(latlng => {
+                    return {
+                        lat: latlng.lat + lat_diff,
+                        lng: latlng.lng + lng_diff
+                    };
+                });
+
+                // Update the line's position with the new points
+                mainTrack.setLatLngs(new_latlngs);
+
+                // Update the start position for the next move event
+                startLatLng = e.latlng;
+            });
+
+            // 3. When the mouse button is released ANYWHERE on the map
+            map.on('mouseup', function (e) {
+                if (isDragging) {
+                    console.log("MOUSEUP. Ending drag.");
+                    isDragging = false;
+
+                    // Re-enable map's double-click zoom
+                    map.doubleClickZoom.enable();
+
+                    // Reset cursor if we are still in edit mode
+                    if (isEditing) {
+                        map.getContainer().style.cursor = 'move';
+                    }
+                }
+            });
+
+        });
+    </script>
+
+</body>
+
+</html>

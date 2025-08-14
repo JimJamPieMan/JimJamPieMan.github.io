@@ -5,6 +5,7 @@
     <link rel="icon" href="favicon.png">
     <title>ADS-B Massive Visualizer</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.css" />
     <style>
         :root {
             --progress: 0%;
@@ -327,18 +328,43 @@
 
     <div id="provider"></div>
     <div id="provider2">
+
         <p>accepted sources are: fr24 flight history KML, adsbex uncorrected pressure alt or https://github.com/LuisSevillano/flightradar24-to-csv</p>
         <p>to hide this box to take screenshots, press the globe on the right handside.</p>
+        <button id="toggleEditButton">Edit Tracks</button>
+        <button id="toggleDrawButton">Draw Bubble</button>
+        <button id="clearBubblesButton">Clear Bubbles</button>
         <input type="file" id="kmlFile" multiple accept=".kml" />
         <input type="file" id="geojsonInput" multiple accept=".geojson,.json">
         <div id="layerskml"></div>
     </div>
 
+    
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
     <script src="https://unpkg.com/leaflet-omnivore/leaflet-omnivore.min.js"></script>
+    <script src='https://unpkg.com/@turf/turf@6/turf.min.js'></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/gokertanrisever/leaflet-ruler@master/src/leaflet-ruler.css"
+        integrity="sha384-P9DABSdtEY/XDbEInD3q+PlL+BjqPCXGcF8EkhtKSfSTr/dS5PBKa9+/PMkW2xsY" crossorigin="anonymous" />
+    <script src="https://cdn.jsdelivr.net/gh/gokertanrisever/leaflet-ruler@master/src/leaflet-ruler.js"
+        integrity="sha384-8SqKZR7V8uOetpjjbcNJHvwuHpb074WS0UXjCLhzfJUqYn3B/uWx1WVv5mwRp1mV"
+        crossorigin="anonymous"></script>
+     
+        <script src="https://iosphere.github.io/Leaflet.hotline/dist/leaflet.hotline.js"></script>
+    <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js"></script>
     <script src="config.js"></script>
     <script>
-
+    /**
+         * Calculates the line-of-sight distance to the horizon from a given altitude.
+         * @param {number} altitudeMeters - The altitude of the observer in meters.
+         * @returns {number} The line-of-sight distance in meters.
+         */
+    function calculateLineOfSightRadius(altitudeMeters) {
+        if (altitudeMeters <= 0) return 0;
+        const earthRadiusMeters = 6371000;
+        // Using the geometric formula: d = sqrt(2*R*h + h^2)
+        const distanceMeters = Math.sqrt(2 * earthRadiusMeters * altitudeMeters + Math.pow(altitudeMeters, 2));
+        return distanceMeters;
+    }
 
         let uuid = crypto.randomUUID();
 
@@ -511,7 +537,7 @@
             minZoom: 2,
             maxZoom: 19,
             attribution: '© OpenStreetMap',
-            opacity: 0.1,
+            opacity: 0.3,
         });
 
         let layers = [];
@@ -519,9 +545,317 @@
         let map = L.map('map', {
             center: [52.3676, 4.9041],
             zoom: 5,
-            worldCopyJump: true,
-            layers: [base_layer]
+            worldCopyJump: false,
+            maxBoundsViscosity: 1.0,
+            layers: [base_layer],
+            zoomDelta: 0.1, // Affects scroll wheel and +/- buttons
+            zoomSnap: 0.1   // Allows intermediate zoom levels
         });
+
+
+    map.pm.addControls({ editControls: true });
+    L.control.ruler().addTo(map);
+    var options = {
+            position: 'topleft',
+            lengthUnit: {
+                factor: 0.539956803, //  from km to nm
+                display: 'Nautical Miles',
+                decimal: 2,
+            },
+        };
+        L.control.ruler(options).addTo(map);
+
+
+            // --- STATE MANAGEMENT FOR BUBBLE DRAWING ---
+                let isDrawingMode = false;
+                let startPoint = null;
+                let startPointMarker = null;
+                let currentFlightTrackGeoJSON = null; // To store the loaded flight path for snapping
+
+                // A layer group to hold all the bubbles we draw
+                const bubbleLayerGroup = L.layerGroup().addTo(map);
+        // Create a new pane that will sit on top of all other layers.
+        map.createPane('ghost-pane');
+        map.getPane('ghost-pane').style.zIndex = 650; // High z-index ensures it's on top
+        // This pane will ignore mouse events itself, but its children (our ghost line) will not.
+ 
+        // --- END OF NEW BLOCK ---
+
+                const drawButton = document.getElementById('toggleDrawButton');
+                const clearButton = document.getElementById('clearBubblesButton');
+
+                    // --- STATE MANAGEMENT FOR TRACK EDITING ---
+                        let isEditingTracks = false;
+                        let activeEditLayer = null;
+                        const editButton = document.getElementById('toggleEditButton');
+                        function findClosestVertex(clickPoint, lineLatLngs) {
+                                let closest = {
+                                    index: -1,
+                                    distance: Infinity,
+                                    latlng: null
+                                };
+
+                                lineLatLngs.forEach((point, index) => {
+                                    const distance = clickPoint.distanceTo(point);
+                                    if (distance < closest.distance) {
+                                        closest.distance = distance;
+                                        closest.index = index;
+                                        closest.latlng = point;
+                                    }
+                                });
+
+                                return closest;
+                            }
+
+                        function rotatePoint(point, center, angle) {
+                                const angleRad = angle * (Math.PI / 180); // Convert angle to radians
+                                const cos = Math.cos(angleRad);
+                                const sin = Math.sin(angleRad);
+
+                                // Translate point to origin
+                                const translatedLng = point.lng - center.lng;
+                                const translatedLat = point.lat - center.lat;
+
+                                // Rotate point
+                                const rotatedLng = translatedLng * cos - translatedLat * sin;
+                                const rotatedLat = translatedLng * sin + translatedLat * cos;
+
+                                // Translate point back
+                                const finalLng = rotatedLng + center.lng;
+                                const finalLat = rotatedLat + center.lat;
+
+                                return L.latLng(finalLat, finalLng, point.alt); // Return new point with original altitude
+                         }
+                         function toggleTrackEditing() {
+                                isEditingTracks = !isEditingTracks;
+
+                                if (isEditingTracks) {
+                                    // --- ENTERING EDIT MODE ---
+                                    editButton.textContent = 'Finish Editing';
+                                    editButton.style.backgroundColor = '#28a745';
+                                    map.dragging.disable();
+
+                                    layerArr.forEach(visibleLayer => {
+                                        if (!visibleLayer.feature) return;
+
+                                        visibleLayer.setStyle({ opacity: 0.3, interactive: false }).bringToBack();
+
+                                        const rawCoords = visibleLayer.feature.features[0].geometry.coordinates;
+                                        const latLngsWithAlt = rawCoords.map(coord => L.latLng(coord[1], coord[0], coord[2]));
+                                        const editableLine = L.polyline(latLngsWithAlt, { color: 'cyan', weight: 10, opacity: 0.8 });
+
+                                        visibleLayer._editableReplacement = editableLine;
+                                        editableLine.addTo(map);
+
+                                        // Your full, working mousedown handler goes here.
+                                        // This part is correct and does not need to change.
+                                        editableLine.on('mousedown', handleInteractionStart);
+                                    });
+
+                                } else {
+                                    // --- EXITING EDIT MODE (WITH GUARANTEED CLEANUP) ---
+                                    editButton.textContent = 'Edit Tracks';
+                                    editButton.style.backgroundColor = '';
+                                    map.dragging.enable();
+                                    map.getContainer().style.cursor = 'grab';
+
+                                    layerArr.forEach(visibleLayer => {
+                                        // Check if this layer was actually being edited.
+                                        if (visibleLayer._editableReplacement) {
+                                            const editableLine = visibleLayer._editableReplacement;
+
+                                            try {
+                                                // --- STEP 1: All the work that might fail goes in here. ---
+                                                console.log("Finishing edit. Attempting to restore original track...");
+
+                                                const finalLatLngs = editableLine.getLatLngs();
+                                                const originalHotlineLayer = visibleLayer.getLayers()[0];
+
+                                                if (originalHotlineLayer && originalHotlineLayer.setLatLngs) {
+                                                    originalHotlineLayer.setLatLngs(finalLatLngs);
+                                                }
+
+                                                const allNewCoords = finalLatLngs.map(p => [p.lng, p.lat, p.alt]);
+                                                const featureToUpdate = visibleLayer.feature.features.find(f => f.geometry.type === 'LineString');
+                                                if (featureToUpdate) {
+                                                    featureToUpdate.geometry.coordinates = allNewCoords;
+                                                }
+
+                                                visibleLayer.setStyle({ opacity: 0.8, interactive: true }).bringToFront();
+                                                drawLabelsForTrack(visibleLayer);
+                                                bubbleLayerGroup.clearLayers();
+
+                                                console.log("Original track restored successfully.");
+
+                                            } finally {
+                                                // --- STEP 2: This code is GUARANTEED to run, even if the 'try' block fails. ---
+                                                console.log("Cleaning up cyan editing line...");
+
+                                                editableLine.off('mousedown');
+                                                map.removeLayer(editableLine);
+                                                delete visibleLayer._editableReplacement;
+
+                                                console.log("Cleanup complete.");
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            // ==========================================================
+                            // THIS EVENT HANDLER NOW LIVES OUTSIDE toggleTrackEditing
+                            // ==========================================================
+                            function handleInteractionStart(e_down) {
+                                if (!isEditingTracks) return;
+                                L.DomEvent.stopPropagation(e_down);
+
+                                const lineBeingEdited = this; // 'this' is the cyan line that was clicked
+                                const startLatLng = e_down.latlng;
+
+                                // ERASE LOGIC...
+                                if (e_down.originalEvent.altKey) {
+                                    const eraserBounds = L.circle(e_down.latlng, { radius: 30 * (map.getZoom() / 2) }).getBounds();
+                                    const pointsToKeep = lineBeingEdited.getLatLngs().filter(p => !eraserBounds.contains(p));
+                                    lineBeingEdited.setLatLngs(pointsToKeep);
+                                    return;
+                                }
+
+                                // DRAG/ROTATE LOGIC...
+                                const initialLatLngs = lineBeingEdited.getLatLngs();
+                                const trackCenter = lineBeingEdited.getBounds().getCenter();
+                                const isRotating = e_down.originalEvent.shiftKey;
+                                map.getContainer().style.cursor = isRotating ? 'crosshair' : 'move';
+
+                                const handleMouseMove = (e_move) => {
+                                    let newLatLngs;
+                                    if (isRotating) {
+                                        const startAngle = Math.atan2(startLatLng.lat - trackCenter.lat, startLatLng.lng - trackCenter.lng);
+                                        const currentAngle = Math.atan2(e_move.latlng.lat - trackCenter.lat, e_move.latlng.lng - trackCenter.lng);
+                                        const angleDiff = (currentAngle - startAngle) * (180 / Math.PI);
+                                        newLatLngs = initialLatLngs.map(p => rotatePoint(p, trackCenter, angleDiff));
+                                    } else {
+                                        const latDiff = e_move.latlng.lat - startLatLng.lat;
+                                        const lngDiff = e_move.latlng.lng - startLatLng.lng;
+                                        newLatLngs = initialLatLngs.map(p => L.latLng(p.lat + latDiff, p.lng + lngDiff, p.alt));
+                                    }
+                                    lineBeingEdited.setLatLngs(newLatLngs);
+                                };
+
+                                const handleMouseUp = () => {
+                                    map.off('mousemove', handleMouseMove);
+                                    map.off('mouseup', handleMouseUp);
+                                    map.getContainer().style.cursor = 'grab';
+                                };
+
+                                map.on('mousemove', handleMouseMove);
+                                map.on('mouseup', handleMouseUp);
+                            }   
+                                
+                                // Remember to include your rotatePoint helper function
+                        editButton.addEventListener('click', toggleTrackEditing);
+
+                // Function to enter/exit drawing mode
+                function toggleDrawing() {
+                    isDrawingMode = !isDrawingMode;
+
+                    if (isDrawingMode) {
+                        // Enter drawing mode
+                        drawButton.textContent = 'Cancel Drawing';
+                        drawButton.style.backgroundColor = '#ffc107'; // A yellow "active" color
+                        map.getContainer().style.cursor = 'crosshair';
+                        startPoint = null; // Reset on entering mode
+                        if (startPointMarker) map.removeLayer(startPointMarker);
+                    } else {
+                        // Exit drawing mode
+                        drawButton.textContent = 'Draw Bubble';
+                        drawButton.style.backgroundColor = ''; // Reset color
+                        map.getContainer().style.cursor = 'grab';
+                        startPoint = null;
+                        if (startPointMarker) map.removeLayer(startPointMarker);
+                    }
+                }
+
+                // Attach listeners to buttons
+                drawButton.addEventListener('click', toggleDrawing);
+                clearButton.addEventListener('click', () => {
+                    bubbleLayerGroup.clearLayers();
+                });
+
+
+                map.on('click', function (e) {
+                        // Only do something if we are in drawing mode and a flight track is loaded
+                        if (!isDrawingMode || !currentFlightTrackGeoJSON) {
+                            return;
+                        }
+
+                        // Snap the user's click to the nearest point on the flight line
+                        const clickPoint = turf.point([e.latlng.lng, e.latlng.lat]);
+                        const snappedPoint = turf.nearestPointOnLine(currentFlightTrackGeoJSON, clickPoint);
+
+                        if (startPoint === null) {
+                            // --- THIS IS THE FIRST CLICK ---
+                            startPoint = snappedPoint;
+                            startPointMarker = L.marker(snappedPoint.geometry.coordinates.slice().reverse(), {
+                                title: 'Bubble Start Point'
+                            }).addTo(map);
+
+                        } else {
+                            // --- THIS IS THE NEW SECOND CLICK LOGIC ---
+                            const endPoint = snappedPoint;
+
+                            // Use turf.lineSlice to get the ACTUAL path segment between the points
+                            const pathSegment = turf.lineSlice(startPoint, endPoint, currentFlightTrackGeoJSON);
+                            const coords = pathSegment.geometry.coordinates;
+
+                            // Initialize the final shape that will hold the merged circles
+                            let unionedLosPolygon = null;
+
+                            // --- PERFORMANCE TUNING ---
+                            // A lower number is more detailed but slower. A higher number is faster but less detailed.
+                            // 5-10 is usually a good balance.
+                            const step = 1;
+
+                            // Loop through each point in the selected segment
+                            for (let i = 0; i < coords.length; i += step) {
+                                const coord = coords[i];
+                                const lng = coord[0];
+                                const lat = coord[1];
+                                const alt = coord[2] || 0; // Altitude in meters from your GeoJSON
+
+                                // Only create a circle if the aircraft is airborne
+                                if (alt > 100) {
+                                    // Calculate the specific radius for THIS point's altitude
+                                    const radiusKm = calculateLineOfSightRadius(alt) / 1000;
+
+                                    // Create a small circle polygon using Turf
+                                    const center = turf.point([lng, lat]);
+                                    const circlePolygon = turf.circle(center, radiusKm, { steps: 32, units: 'kilometers' });
+
+                                    // Merge this circle with the main polygon
+                                    if (unionedLosPolygon === null) {
+                                        unionedLosPolygon = circlePolygon;
+                                    } else {
+                                        // This is the key operation: merge the shapes
+                                        unionedLosPolygon = turf.union(unionedLosPolygon, circlePolygon);
+                                    }
+                                }
+                            }
+
+                            // After the loop, if we created a shape, add it to the map
+                            if (unionedLosPolygon) {
+                                L.geoJSON(unionedLosPolygon, {
+                                    style: {
+                                        color: "#8B0000",
+                                        weight: 1,
+                                        fillColor: "red",
+                                        fillOpacity: 0.2
+                                    }
+                                }).addTo(bubbleLayerGroup);
+                            }
+
+                            // Exit drawing mode and clean up
+                            toggleDrawing();
+                        }
+                    });
         const minAlt = 0;
             const maxAlt = 12000;
 
@@ -591,280 +925,342 @@
         let cached_tiles = {};
         var layerArr = [];
 
-        function splitLineStringByAltitude(lineFeature) {
-                const coords = lineFeature.geometry.coordinates;
-                const segments = [];
-
-                for (let i = 0; i < coords.length - 1; i++) {
-                    const start = coords[i];
-                    const end = coords[i + 1];
-                    const avgAlt = ((start[2] || 0) + (end[2] || 0)) / 2;
-
-                    segments.push({
-                        type: "Feature",
-                        geometry: {
-                            type: "LineString",
-                            coordinates: [start, end]
-                        },
-                        properties: {
-                            altitude: avgAlt
-                        }
-                    });
+            /**
+         * Calculates the line-of-sight distance to the horizon from a given altitude.
+         * @param {number} altitudeMeters - The altitude of the observer in meters.
+         * @returns {number} The line-of-sight distance in meters.
+         */
+                function calculateLineOfSightRadius(altitudeMeters) {
+                    const earthRadiusMeters = 6371000;
+                    // Using the geometric formula: d = sqrt(2*R*h + h^2)
+                    const distanceMeters = Math.sqrt(2 * earthRadiusMeters * altitudeMeters + Math.pow(altitudeMeters, 2));
+                    return distanceMeters;
                 }
-
-                return {
-                    type: "FeatureCollection",
-                    features: segments
-                };
-            }
-
-        document.getElementById('geojsonInput').addEventListener('change', function (e) {
-
-            for(var i = 0; i < e.target.files.length; i++) {
-                const file = e.target.files[i];
-                if (!file) return;
-
-
-                const reader = new FileReader();
-                reader.onload = function (event) {
-                    const geojsonText = event.target.result;
-                    const geojsonDataRaw = JSON.parse(geojsonText);
-                    function convertToGeoJSONFeatureCollection(data) {
-                        const feature = data.features?.[0];
-                        if (!feature || feature.geometry?.type !== 'LineString') {
-                            throw new Error('GeoJSON must be a FeatureCollection with a LineString feature.');
-                        }
-
-                        
-
-                        const coords = feature.geometry.coordinates;
-                        const altitudeArray = feature.properties || [];
-
-                        // If already 3D coordinates:
-                        if (coords[0].length === 3) {
-                            return splitLineStringByAltitude(feature);
-                        }
-
-                        if (!Array.isArray(coords) || coords.length !== altitudeArray.length) {
-                            throw new Error('Coordinate and altitude array lengths do not match.');
-                        }
-
-                        // Inject altitude into each coordinate
-                        const coordsWithAlt = coords.map((coord, i) => [...coord, altitudeArray[i].altitude?.meters ?? 0]);
-                        feature.geometry.coordinates = coordsWithAlt;
-
-                        // Now split into segments
-                        return splitLineStringByAltitude(feature);
-                    }
-                    const geojsonData = convertToGeoJSONFeatureCollection(geojsonDataRaw);
-
-                    const geojsonLayer = L.geoJSON(geojsonData, {
-                        style: function (feature) {
-                            const alt = getAltitudeFromFeature(feature);
-                            console.log('Altitude:', alt);
-                            return {
-                                color: getGradientColor(alt),
-                                weight: 2,
-                                opacity: 0.7
-                            };
-                        },
-                        onEachFeature: function (feature, layer) {
-                            if (feature.properties && feature.properties.name) {
-                                layer.bindPopup(feature.properties.name);
-                            }
-                        }
-                    });
-
-                    geojsonLayer.addTo(map);
-                    map.fitBounds(geojsonLayer.getBounds());
-                    layerArr.push(geojsonLayer);
-
-                    // Add button to remove
-                    const layerBtn = document.createElement("button");
-                    layerBtn.id = layerArr.length;
-                    layerBtn.textContent = "Remove " + file.name;
-
-                    const br = document.createElement("br");
-                    br.id = "break" + file.name;
-
-                    document.getElementById('layerskml').appendChild(layerBtn);
-                    document.getElementById('layerskml').appendChild(br);
-
-                    layerBtn.onclick = function () {
-                        map.removeLayer(geojsonLayer);
-                        document.getElementById("layerskml").removeChild(document.getElementById(layerArr.length));
-                        layerArr.splice(layerArr.indexOf(geojsonLayer), 1);
-                        
-                        document.getElementById("layerskml").removeChild(document.getElementById("break" + file.name));
-                    };
-                };
-
-                reader.readAsText(file);
-            }
-            });
-
-          document.getElementById('kmlFile').addEventListener('change', function (e) {
-            console.log("file uploaded");
-            for (let i = 0; i < e.target.files.length; i++) {
-                const file = e.target.files[0];
-                if (!file) return;
-              
-             
-                const reader = new FileReader();
-                reader.onload = function (event) {
-                    const kmlText = event.target.result;
-
-                    function extractCoordsFromKML(kmlText) {
-                        const coords = [];
-
-                        // Match <gx:coord> format: lon lat alt
-                        const gxCoordRegex = /<gx:coord[^>]*>\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s*<\/gx:coord>/gi;
-                        let match;
-                        while ((match = gxCoordRegex.exec(kmlText)) !== null) {
-                            const lon = parseFloat(match[1]);
-                            const lat = parseFloat(match[2]);
-                            const alt = parseFloat(match[3]);
-                            coords.push([lon, lat, alt]);
-                        }
-
-                        // If no gx:coord found, try <coordinates>
-                        if (coords.length === 0) {
-                            const coordinatesRegex = /<coordinates[^>]*>([\s\S]*?)<\/coordinates>/gi;
-                            while ((match = coordinatesRegex.exec(kmlText)) !== null) {
-                                const coordBlock = match[1].trim(); // text inside <coordinates>...</coordinates>
-
-                                const lines = coordBlock.split(/\s+/); // split on any whitespace
-
-                                lines.forEach(line => {
-                                    const parts = line.split(',');
-                                    const lon = parseFloat(parts[0]);
-                                    const lat = parseFloat(parts[1]);
-                                    const alt = parseFloat(parts[2]) || 0; // default to 0 if missing
-                                    if (!isNaN(lon) && !isNaN(lat)) {
-                                        coords.push([lon, lat, alt]);
-                                    }
-                                });
-                            }
-                        }
-
-                        console.log("Extracted", coords[0]);
-                        return coords;
-                    }
-
-                    const coords = extractCoordsFromKML(kmlText);
-
-
-
-                    const geojson = {
-                        type: "FeatureCollection",
-                        features: [{
-                            type: "Feature",
-                            geometry: {
-                                type: "LineString",
-                                coordinates: coords
-                            },
-                            properties: {}
-                        }]
-                    };
-
-                    function convertToGeoJSONFeatureCollection(data) {
-                        const feature = data.features?.[0];
-                        if (!feature || feature.geometry?.type !== 'LineString') {
-                            throw new Error('GeoJSON must be a FeatureCollection with a LineString feature.');
-                        }
-
-
-
-                        const coords = feature.geometry.coordinates;
-                        const altitudeArray = feature.properties || [];
-
-                        // If already 3D coordinates:
-                        if (coords[0].length === 3) {
-                            return splitLineStringByAltitude(feature);
-                        }
-
-                        if (!Array.isArray(coords) || coords.length !== altitudeArray.length) {
-                            throw new Error('Coordinate and altitude array lengths do not match.');
-                        }
-
-                        // Inject altitude into each coordinate
-                        const coordsWithAlt = coords.map((coord, i) => [...coord, altitudeArray[i].altitude?.meters ?? 0]);
-                        feature.geometry.coordinates = coordsWithAlt;
-
-                        // Now split into segments
-                        return splitLineStringByAltitude(feature);
-                    }
-                    const geojsonData = convertToGeoJSONFeatureCollection(geojson);
-
-                    // // Create a Blob URL from the string
-                    // const blob = new Blob([kmlText], { type: 'application/vnd.google-earth.kml+xml' });
-                    // const blobUrl = URL.createObjectURL(blob);
-
-                    // //const kmlLayer = omnivore.kml(blobUrl);
-                    
-                    // const kmlLayer = omnivore.kml(blobUrl, null, L.geoJSON(null, {
-                          
-                    //     style: function (feature) {
-
-                    //      console.log('Altitude:', getAltitudeFromFeature(feature));
-                    //         const alt = getAltitudeFromFeature(feature);
-                    //         return {
-                    //         color: getGradientColor(alt),
-                    //         weight: 2,
-                    //         opacity: 0.7
-                    //         }
-                    //     },
-                        
-                    // }));
-                  const geojsonLayer = L.geoJSON(geojsonData, {
-                      style: function (feature) {
-                          const alt = getAltitudeFromFeature(feature);
-                          console.log('Altitude:', alt);
-                          return {
-                              color: getGradientColor(alt),
-                              weight: 2,
-                              opacity: 0.7
-                          };
-                      },
-                      onEachFeature: function (feature, layer) {
-                          if (feature.properties && feature.properties.name) {
-                              layer.bindPopup(feature.properties.name);
-                          }
-                      }
-                  });
-
-                  geojsonLayer.addTo(map);
-                  map.fitBounds(geojsonLayer.getBounds());
-                  layerArr.push(geojsonLayer);
-
-                  // Add button to remove
-                  const layerBtn = document.createElement("button");
-                  layerBtn.id = layerArr.length;
-                  layerBtn.textContent = "Remove " + file.name;
-
-                  const br = document.createElement("br");
-                  br.id = "break" + file.name;
-
-                  document.getElementById('layerskml').appendChild(layerBtn);
-                  document.getElementById('layerskml').appendChild(br);
-
-                  layerBtn.onclick = function () {
-                      map.removeLayer(geojsonLayer);
-                      document.getElementById("layerskml").removeChild(document.getElementById(layerArr.length));
-                      layerArr.splice(layerArr.indexOf(geojsonLayer), 1);
-                      
-                      document.getElementById("layerskml").removeChild(document.getElementById("break" + file.name));
-                  };
-              };
-            
-
-              reader.readAsText(file);
-            }
-            
-            });
 
         
 
+        // function splitLineStringByAltitude(lineFeature) {
+        //         const coords = lineFeature.geometry.coordinates;
+        //         const segments = [];
+
+        //         for (let i = 0; i < coords.length - 1; i++) {
+        //             const start = coords[i];
+        //             const end = coords[i + 1];
+        //             const avgAlt = ((start[2] || 0) + (end[2] || 0)) / 2;
+
+        //             segments.push({
+        //                 type: "Feature",
+        //                 geometry: {
+        //                     type: "LineString",
+        //                     coordinates: [start, end]
+        //                 },
+        //                 properties: {
+        //                     altitude: avgAlt
+        //                 }
+        //             });
+        //         }
+
+        //         return {
+        //             type: "FeatureCollection",
+        //             features: segments
+        //         };
+        //     }
+
+        function unwrapLongitudes(coords) {
+                const unwrapped = [coords[0].slice()]; // clone first point
+                let prevLon = coords[0][0];
+
+                for (let i = 1; i < coords.length; i++) {
+                    let curr = coords[i].slice(); // clone
+                    let lon = curr[0];
+
+                    while (lon - prevLon > 180) lon -= 360;
+                    while (lon - prevLon < -180) lon += 360;
+
+                    curr[0] = lon;
+                    unwrapped.push(curr);
+                    prevLon = lon;
+                }
+
+                return unwrapped;
+            }
+        
+            function splitLineStringByAltitude(lineFeature) {
+                    const rawCoords = lineFeature.geometry.coordinates;
+                    const coords = unwrapLongitudes(rawCoords);
+                    const segments = [];
+
+                    for (let i = 0; i < coords.length - 1; i++) {
+                        const start = coords[i];
+                        const end = coords[i + 1];
+
+                        const startAlt = start[2] ?? 0;
+                        const endAlt = end[2] ?? 0;
+                        const avgAlt = (startAlt + endAlt) / 2;
+
+                        segments.push({
+                            type: "Feature",
+                            geometry: {
+                                type: "LineString",
+                                coordinates: [start, end]
+                            },
+                            properties: {
+                                altitude: avgAlt
+                            }
+                        });
+                    }
+
+                    return {
+                        type: "FeatureCollection",
+                        features: segments
+                    };
+                }
+
+
+
+                document.getElementById('geojsonInput').addEventListener('change', function (e) {
+                        for (var i = 0; i < e.target.files.length; i++) {
+                            const file = e.target.files[i];
+                            if (!file) continue;
+
+                            const reader = new FileReader();
+                            reader.onload = function (event) {
+                                try {
+                                    const geojsonDataRaw = JSON.parse(event.target.result);
+                                    const feature = geojsonDataRaw.features[0];
+
+                                    if (!feature || feature.geometry.type !== 'LineString') {
+                                        throw new Error("File must be a GeoJSON with a LineString feature.");
+                                    }
+
+                                    // --- DATA PREPARATION ---
+                                    if (!feature.properties) feature.properties = {};
+                                    feature.properties.name = file.name;
+                                    currentFlightTrackGeoJSON = feature;
+                                    if (isDrawingMode) toggleDrawing();
+
+                                    // --- ROBUST ALTITUDE PREPARATION LOGIC ---
+                                    // This function guarantees we get the altitude correctly from your specific file structure.
+                                    const prepareCoordinates = (feat) => {
+                                        const originalCoords = feat.geometry.coordinates;
+                                        const propertiesArray = feat.properties;
+
+                                        // This is the format your diagnostic logs showed.
+                                        if (Array.isArray(propertiesArray) && originalCoords.length === propertiesArray.length) {
+                                            console.log("Altitude source: Merging coordinates with properties array.");
+                                            return originalCoords.map((coord, index) => {
+                                                const altInMeters = propertiesArray[index]?.altitude?.meters || 0;
+                                                return [coord[0], coord[1], altInMeters]; // [lon, lat, alt]
+                                            });
+                                        }
+                                        // This is a fallback for other standard GeoJSON formats.
+                                        if (originalCoords[0] && originalCoords[0].length === 3) {
+                                            console.log("Altitude source: Found directly in coordinate array.");
+                                            return originalCoords;
+                                        }
+                                        // If no altitude data is found, default to 0.
+                                        console.warn("Altitude source: Not found. Defaulting to 0.");
+                                        return originalCoords.map(coord => [coord[0], coord[1], 0]);
+                                    };
+
+                                    const coordsWithAlt = prepareCoordinates(feature);
+
+                                    // IMPORTANT: Update the feature's geometry with our clean, unified data.
+                                    feature.geometry.coordinates = coordsWithAlt;
+                                    // --- END OF PREPARATION ---
+
+
+                                    // --- HOTLINE LAYER CREATION ---
+                                    // 1. Format the data for the Hotline plugin: [lat, lon, value]
+                                    const hotlineData = coordsWithAlt.map(c => [c[1], c[0], c[2]]);
+
+                                    // 2. Define the hotline options and your desired color palette.
+                                    const hotlineOptions = {
+                                        min: 0,        // Minimum altitude in meters
+                                        max: 12192,    // Maximum altitude (~40,000 ft)
+                                        palette: {
+                                            0.0: '#00FF00', // Green, corresponding to HSL hue 120
+                                            0.5: '#0000FF', // Blue, corresponding to HSL hue 240
+                                            1.0: '#FF0000'     // Red for high altitude
+                                        },
+                                        weight: 2,
+                                        outlineColor: '#000000',
+                                        outlineWidth: 0
+                                    };
+
+                                    // 3. Create the hotline layer.
+                                    const hotlineLayer = L.hotline(hotlineData, hotlineOptions);
+
+                                    // --- LAYER MANAGEMENT & UI ---
+                                    // We wrap it in a FeatureGroup for consistency with the rest of your app.
+                                    const layerContainer = L.featureGroup([hotlineLayer]);
+
+                                    // Attach the raw GeoJSON data. This is CRITICAL for your editing functions.
+                                    layerContainer.feature = geojsonDataRaw;
+
+                                    layerContainer.addTo(map);
+                                    map.fitBounds(layerContainer.getBounds());
+                                    layerArr.push(layerContainer);
+
+                                    // Create and add the 'Remove' button
+                                    const layerBtn = document.createElement("button");
+                                    layerBtn.id = file.name;
+                                    layerBtn.textContent = "Remove " + file.name;
+                                    const br = document.createElement("br");
+                                    br.id = "break" + file.name;
+                                    document.getElementById('layerskml').appendChild(layerBtn);
+                                    document.getElementById('layerskml').appendChild(br);
+
+                                    layerBtn.onclick = function () {
+                                        // This logic now correctly targets the container for removal
+                                        if (layerContainer._editableReplacement) {
+                                            map.removeLayer(layerContainer._editableReplacement);
+                                        }
+                                        map.removeLayer(layerContainer);
+                                        document.getElementById("layerskml").removeChild(layerBtn);
+                                        document.getElementById("layerskml").removeChild(br);
+                                        layerArr.splice(layerArr.indexOf(layerContainer), 1);
+                                        if (currentFlightTrackGeoJSON?.properties?.name === file.name) {
+                                            currentFlightTrackGeoJSON = null;
+                                            bubbleLayerGroup.clearLayers();
+                                        }
+                                    };
+
+                                    // Draw any labels associated with this track
+                                   // drawLabelsForTrack(layerContainer);
+
+                                } catch (error) {
+                                    alert('Error processing GeoJSON: ' + error.message);
+                                    console.error(error);
+                                }
+                            };
+                            reader.readAsText(file);
+                        }
+                    });
+          
+
+                    document.getElementById('kmlFile').addEventListener('change', function (e) {
+                            console.log("kml file uploaded");
+                            for (let i = 0; i < e.target.files.length; i++) {
+                                const file = e.target.files[i];
+                                if (!file) continue;
+
+                                const reader = new FileReader();
+                                reader.onload = function (event) {
+                                    try {
+                                        const kmlText = event.target.result;
+                                        if (isDrawingMode) toggleDrawing();
+
+                                        // --- YOUR KML PARSING LOGIC (UNCHANGED AND RESPECTED) ---
+                                        // This function correctly extracts [lon, lat, alt] from your KML files.
+                                        function extractCoordsFromKML(kmlText) {
+                                            const coords = [];
+                                            const gxCoordRegex = /<gx:coord[^>]*>\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s*<\/gx:coord>/gi;
+                                            let match;
+                                            while ((match = gxCoordRegex.exec(kmlText)) !== null) {
+                                                coords.push([parseFloat(match[1]), parseFloat(match[2]), parseFloat(match[3])]);
+                                            }
+                                            if (coords.length === 0) {
+                                                const coordinatesRegex = /<coordinates[^>]*>([\s\S]*?)<\/coordinates>/gi;
+                                                while ((match = coordinatesRegex.exec(kmlText)) !== null) {
+                                                    const coordBlock = match[1].trim().split(/\s+/);
+                                                    coordBlock.forEach(line => {
+                                                        const parts = line.split(',');
+                                                        if (parts.length >= 2) {
+                                                            coords.push([parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2]) || 0]);
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                            return coords;
+                                        }
+                                        const coordsWithAlt = extractCoordsFromKML(kmlText);
+                                        if (coordsWithAlt.length === 0) {
+                                            throw new Error("No coordinates found in the KML file.");
+                                        }
+
+                                        // --- YOUR GEOJSON CONVERSION (UNCHANGED) ---
+                                        // We keep this to maintain a consistent data structure for the rest of your app.
+                                        const geojsonDataRaw = {
+                                            type: "FeatureCollection",
+                                            features: [{
+                                                type: "Feature",
+                                                geometry: {
+                                                    type: "LineString",
+                                                    coordinates: coordsWithAlt
+                                                },
+                                                properties: { name: file.name }
+                                            }]
+                                        };
+                                        currentFlightTrackGeoJSON = geojsonDataRaw.features[0];
+
+                                        // =================================================================
+                                        // ===     THE ONLY CHANGE IS THIS BLOCK - FROM HERE...          ===
+                                        // =================================================================
+
+                                        // --- NEW HOTLINE LAYER CREATION ---
+                                        // 1. We already have the clean coordinate data from your parser.
+                                        // 2. Format it for the Hotline plugin: [lat, lon, value]
+                                        const hotlineData = coordsWithAlt.map(c => [c[1], c[0], c[2] || 0]);
+
+                                        // 3. Define the hotline options with your desired palette.
+                                        const hotlineOptions = {
+                                            min: 0,
+                                            max: 12192,
+                                            palette: {
+                                                0.0: '#00ff00', // Green
+                                                0.5: '#0000ff', // Blue
+                                                1.0: '#ff0000'  // Red
+                                            },
+                                            weight: 1.5,
+                                            outlineWidth: 0
+                                        };
+
+                                        // 4. Create the single, smooth hotline layer.
+                                        const hotlineLayer = L.hotline(hotlineData, hotlineOptions);
+
+                                        // We wrap it for consistency with the rest of your app.
+                                        const layerContainer = L.featureGroup([hotlineLayer]);
+                                        layerContainer.feature = geojsonDataRaw; // Attach the critical raw data
+
+                                        // =================================================================
+                                        // ===     ...TO HERE. THE REST OF THE CODE IS THE SAME.         ===
+                                        // =================================================================
+
+                                        layerContainer.addTo(map);
+                                        map.fitBounds(layerContainer.getBounds());
+                                        layerArr.push(layerContainer);
+
+                                        // --- UI BUTTONS (now targets the new layerContainer) ---
+                                        const layerBtn = document.createElement("button");
+                                        layerBtn.id = file.name;
+                                        layerBtn.textContent = "Remove " + file.name;
+                                        const br = document.createElement("br");
+                                        br.id = "break" + file.name;
+                                        document.getElementById('layerskml').appendChild(layerBtn);
+                                        document.getElementById('layerskml').appendChild(br);
+
+                                        layerBtn.onclick = function () {
+                                            if (layerContainer._ghostDragLayer) {
+                                                map.removeLayer(layerContainer._ghostDragLayer);
+                                            }
+                                            map.removeLayer(layerContainer);
+                                            document.getElementById("layerskml").removeChild(layerBtn);
+                                            layerArr.splice(layerArr.indexOf(layerContainer), 1);
+                                            document.getElementById("layerskml").removeChild(document.getElementById("break" + file.name));
+                                            if (currentFlightTrackGeoJSON?.properties?.name === file.name) {
+                                                currentFlightTrackGeoJSON = null;
+                                                bubbleLayerGroup.clearLayers();
+                                            }
+                                        };
+                                    } catch (error) {
+                                        alert('Error processing KML file: ' + error.message);
+                                        console.error(error);
+                                    }
+                                };
+                                reader.readAsText(file);
+                            }
+                        });
         /// Protect from race conditions.
         let report_sequence_num = 0;
 
