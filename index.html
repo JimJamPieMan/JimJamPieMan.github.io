@@ -6,6 +6,7 @@
     <title>ADS-B Massive Visualizer</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
     <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.coordinates/dist/Leaflet.Coordinates-0.1.5.css" />
     <style>
         :root {
             --progress: 0%;
@@ -351,6 +352,7 @@
      
         <script src="https://iosphere.github.io/Leaflet.hotline/dist/leaflet.hotline.js"></script>
     <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js"></script>
+    <script src="https://unpkg.com/leaflet.coordinates/dist/Leaflet.Coordinates-0.1.5.min.js"></script>
     <script src="config.js"></script>
     <script>
     /**
@@ -551,6 +553,16 @@
             zoomDelta: 0.1, // Affects scroll wheel and +/- buttons
             zoomSnap: 0.1   // Allows intermediate zoom levels
         });
+
+        L.control.coordinates({
+                position: "topleft",     // UI control placement
+                decimals: 4,                // Number of decimal places
+                enableUserInput: true,      // Allows manual coordinate entry
+                useLatLngOrder: true,       // Keeps lat/lng input order
+                markerType: L.marker,       // Type of marker to place
+                markerProps: {},            // Custom marker options (e.g., draggable)
+            }).addTo(map);
+
 
 
     map.pm.addControls({ editControls: true });
